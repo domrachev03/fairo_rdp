@@ -50,6 +50,24 @@ FrankaTorqueControlClient::FrankaTorqueControlClient(
     spdlog::info("Connecting to Franka Emika...");
     robot_ptr_.reset(new franka::Robot(config["robot_ip"].as<std::string>()));
     model_ptr_.reset(new franka::Model(robot_ptr_->loadModel()));
+    // // Hardcoded payload/EE for FT + hand
+    const double load_mass = 1.3;
+    const std::array<double, 3> F_x_Cload = {-0.01, 0.0, 0.03};
+    // Row-major inertia matrix in EE frame
+    const std::array<double, 9> load_inertia = {0.001, 0.0, 0.0, 0.0, 0.0025,
+                                                0.0,   0.0, 0.0, 0.0017};
+    // NE->EE transform (column-major) from endeffector-config.json "transformation"
+    const std::array<double, 16> NE_T_EE = {0.7071, -0.7071, 0.0,    0.0,
+                                            0.7071, 0.7071,  0.0,    0.0,
+                                            0.0,    0.0,     1.0,    0.0,
+                                            0.0,    0.0,     0.1714, 1.0};
+    try {
+      robot_ptr_->setEE(NE_T_EE);
+      robot_ptr_->setLoad(load_mass, F_x_Cload, load_inertia);
+      spdlog::info("Applied hardcoded EE transform and payload to robot.");
+    } catch (const std::exception &ex) {
+      spdlog::error("Failed to set EE/payload on robot: {}", ex.what());
+    }
     spdlog::info("Connected.");
   } else {
     spdlog::info(

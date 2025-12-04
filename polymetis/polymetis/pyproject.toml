@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "polymetis"
+version = "0.2"
+dependencies = [
+  "alephzero",
+]
+
+[tool.hatch.build.targets.wheel]
+# Treat "python/" as the source root so packages appear top-level
+sources = ["python"]
+# Ship only the "python/" tree (then remap it to top-level via `sources`)
+only-include = ["python"]
+# Avoid duplicating raw script files inside site-packages; they'll be installed via shared-scripts below
+exclude = ["python/scripts/**"]
+
+# Install raw script files from python/scripts/* into the environment's bin/Scripts
+# (replicates setuptools' `scripts=` behavior).
+[tool.hatch.build.targets.wheel.shared-scripts]
+"python/scripts" = "/"

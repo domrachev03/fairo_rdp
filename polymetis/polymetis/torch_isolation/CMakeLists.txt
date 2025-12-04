@@ -7,8 +7,6 @@ project(torch_isolation)
 
 add_subdirectory("pinocchio_isolation/")
 
-add_definitions(-D_GLIBCXX_USE_CXX11_ABI=0)
-
 # Find Torch
 execute_process (
     COMMAND bash -c "python -c 'from distutils.sysconfig import get_python_lib; print(get_python_lib())' | tr -d '\n'"
@@ -16,6 +14,9 @@ execute_process (
 )
 set(Torch_DIR "${site_packages_path}/torch/share/cmake/Torch/")
 find_package(Torch REQUIRED)
+
+# Match PyTorch's own compiler flags (ABI selection, etc.)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 
 # Find Eigen
 find_package(Eigen3 REQUIRED)

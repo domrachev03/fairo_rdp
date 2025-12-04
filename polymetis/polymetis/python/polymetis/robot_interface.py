@@ -441,8 +441,12 @@ class RobotInterface(BaseRobotInterface):
         pos, quat = self.robot_model.forward_kinematics(joint_pos)
         return pos, quat
 
-    def get_jacobian(joint_angles):
-        raise NotImplementedError  # TODO
+    def get_jacobian(self, joint_angles):
+        return self.robot_model.compute_jacobian(joint_angles)
+
+    def get_cur_jacobian(self):
+        joint_pos = self.get_joint_positions()
+        return self.get_jacobian(joint_pos)
 
     """
     Movement methods
