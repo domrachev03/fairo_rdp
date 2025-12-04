@@ -675,6 +675,58 @@ class RobotInterface(BaseRobotInterface):
 
         return self.send_torch_policy(torch_policy=torch_policy, blocking=False)
 
+    def start_cartesian_impedance_with_ff(self, Kx=None, Kxd=None, **kwargs):
+        """Starts Cartesian impedance control with an end-effector wrench feedforward term.
+        The desired EE pose can be updated using `update_desired_ee_pose_cartesian`, and the wrench with `update_desired_ee_wrench`.
+        """
+        torch_policy = toco.policies.CartesianImpedanceControlWithFF(
+            joint_pos_current=self.get_joint_positions(),
+            Kp=self.Kx_default if Kx is None else Kx,
+            Kd=self.Kxd_default if Kxd is None else Kxd,
+            robot_model=self.robot_model,
+            ignore_gravity=self.use_grav_comp,
+        )
+
+        return self.send_torch_policy(torch_policy=torch_policy, blocking=False)
+
+    def start_cartesian_admittance(
+        self,
+        adm_mass: torch.Tensor = None,
+        adm_damping: torch.Tensor = None,
+        adm_stiffness: torch.Tensor = None,
+        Kx: torch.Tensor = None,
+        Kxd: torch.Tensor = None,
+        **kwargs,
+    ):
+        """Starts a Cartesian admittance controller.
+
+        Args:
+            adm_mass: 6x6 inertia shaping matrix (defaults to diag([3,3,3,1,1,1]))
+            adm_damping: 6x6 damping matrix for admittance filter (defaults to diag([80,80,80,10,10,10]))
+            adm_stiffness: 6x6 stiffness matrix for admittance filter (defaults to diag([300,300,300,30,30,30]))
+            Kx: Outer-loop Cartesian P gains
+            Kxd: Outer-loop Cartesian D gains
+        """
+        default_mass = torch.diag(torch.tensor([3.0, 3.0, 3.0, 1.0, 1.0, 1.0]))
+        default_damping = torch.diag(torch.tensor([80.0, 80.0, 80.0, 10.0, 10.0, 10.0]))
+        default_stiffness = torch.diag(
+            torch.tensor([300.0, 300.0, 300.0, 30.0, 30.0, 30.0])
+        )
+
+        torch_policy = toco.policies.CartesianAdmittanceControl(
+            joint_pos_current=self.get_joint_positions(),
+            adm_mass=default_mass if adm_mass is None else adm_mass,
+            adm_damping=default_damping if adm_damping is None else adm_damping,
+            adm_stiffness=default_stiffness if adm_stiffness is None else adm_stiffness,
+            Kx=self.Kx_default if Kx is None else Kx,
+            Kxd=self.Kxd_default if Kxd is None else Kxd,
+            robot_model=self.robot_model,
+            dt=1.0 / self.hz,
+            ignore_gravity=self.use_grav_comp,
+        )
+
+        return self.send_torch_policy(torch_policy=torch_policy, blocking=False)
+
     def update_desired_joint_positions(self, positions: torch.Tensor) -> int:
         """Update the desired joint positions used by the joint position control mode.
         Requires starting a joint impedance controller with `start_joint_impedance` beforehand.
@@ -684,6 +736,89 @@ class RobotInterface(BaseRobotInterface):
         except grpc.RpcError as e:
             log.error(
                 "Unable to update desired joint positions. Use 'start_joint_impedance' to start a joint impedance controller."
+            )
+            raise e
+
+        return update_idx
+
+    def update_desired_ee_wrench(self, wrench: torch.Tensor) -> int:
+        """Update the EE wrench feedforward term (treated as controller state).
+        Requires starting `start_cartesian_impedance_with_ff` beforehand.
+        """
+        try:
+            update_idx = self.update_current_policy({"ee_wrench_ff": wrench})
+        except grpc.RpcError as e:
+            log.error(
+                "Unable to update desired EE wrench. Use 'start_cartesian_impedance_with_ff' to start the controller first."
+            )
+            raise e
+
+        return update_idx
+
+    def update_admittance_setpoint(
+        self,
+        position: torch.Tensor = None,
+        orientation: torch.Tensor = None,
+        twist: torch.Tensor = None,
+        acceleration: torch.Tensor = None,
+    ) -> int:
+        """Update the desired pose/velocity/acceleration for the running admittance controller.
+        Requires starting `start_cartesian_admittance` beforehand.
+        """
+        update_dict: Dict[str, torch.Tensor] = {}
+
+        if position is not None:
+            update_dict["adm_pos_desired"] = position
+
+        if orientation is not None:
+            update_dict["adm_quat_desired"] = orientation
+
+        if twist is not None:
+            update_dict["adm_twist_desired"] = twist
+
+        if acceleration is not None:
+            update_dict["adm_acc_desired"] = acceleration
+
+        if len(update_dict) == 0:
+            log.warning("No admittance update values provided; skipping update.")
+            return -1
+
+        try:
+            update_idx = self.update_current_policy(update_dict)
+        except grpc.RpcError as e:
+            log.error(
+                "Unable to update admittance set-point. Use 'start_cartesian_admittance' to start the controller first."
+            )
+            raise e
+
+        return update_idx
+
+    def update_desired_ee_pose_cartesian(
+        self,
+        position: torch.Tensor = None,
+        orientation: torch.Tensor = None,
+        ee_vel: torch.Tensor = None,
+        ee_rvel: torch.Tensor = None,
+    ) -> int:
+        """Update desired EE pose/velocity for Cartesian controllers (e.g. CartesianImpedanceControlWithFF)."""
+        ee_pos_current, ee_quat_current = self.get_ee_pose()
+        ee_pos_desired = ee_pos_current if position is None else position
+        ee_quat_desired = ee_quat_current if orientation is None else orientation
+        ee_vel_desired = torch.zeros(3) if ee_vel is None else ee_vel
+        ee_rvel_desired = torch.zeros(3) if ee_rvel is None else ee_rvel
+
+        try:
+            update_idx = self.update_current_policy(
+                {
+                    "ee_pos_desired": ee_pos_desired,
+                    "ee_quat_desired": ee_quat_desired,
+                    "ee_vel_desired": ee_vel_desired,
+                    "ee_rvel_desired": ee_rvel_desired,
+                }
+            )
+        except grpc.RpcError as e:
+            log.error(
+                "Unable to update desired EE pose for Cartesian controller. Ensure a Cartesian controller is running."
             )
             raise e
 
