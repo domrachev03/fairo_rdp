@@ -30,6 +30,11 @@ class BulletManipulatorEnv(AbstractControlledEnv):
         gui: Whether to initialize the PyBullet simulation in GUI mode.
 
         use_grav_comp: If True, adds gravity compensation torques to the input torques.
+        
+        simulation_urdf_path: Optional path to URDF for PyBullet simulation. If provided,
+                              this URDF is used for visualization (can include gripper).
+                              The robot_model_cfg.robot_description_path is still used for
+                              Pinocchio (dynamics/kinematics calculations).
     """
 
     def __init__(
@@ -39,11 +44,18 @@ class BulletManipulatorEnv(AbstractControlledEnv):
         use_grav_comp: bool = True,
         gravity: float = 9.81,
         extract_config_from_rdf=False,
+        simulation_urdf_path: str = None,
     ):
         self.robot_model_cfg = robot_model_cfg
+        # robot_description_path is used for Pinocchio (dynamics model)
         self.robot_description_path = get_full_path_to_urdf(
             self.robot_model_cfg.robot_description_path
         )
+        # simulation_urdf_path is used for PyBullet (can include gripper for visualization)
+        if simulation_urdf_path is not None:
+            self.simulation_urdf_path = get_full_path_to_urdf(simulation_urdf_path)
+        else:
+            self.simulation_urdf_path = self.robot_description_path
 
         self.gui = gui
         self.controlled_joints = self.robot_model_cfg.controlled_joints
@@ -72,15 +84,15 @@ class BulletManipulatorEnv(AbstractControlledEnv):
 
         self.sim.setGravity(0, 0, -gravity)
 
-        # Load robot
-        ext = os.path.splitext(self.robot_description_path)[-1][1:]
+        # Load robot using simulation_urdf_path (which may include gripper for visualization)
+        ext = os.path.splitext(self.simulation_urdf_path)[-1][1:]
         if ext == "urdf":
             self.world_id, self.robot_id = self.load_robot_description_from_urdf(
-                self.robot_description_path, self.sim
+                self.simulation_urdf_path, self.sim
             )
         elif ext == "sdf":
             self.world_id, self.robot_id = self.load_robot_description_from_sdf(
-                self.robot_description_path, self.sim
+                self.simulation_urdf_path, self.sim
             )
         else:
             raise Exception(f"Unknown robot definition extension {ext}!")
@@ -105,6 +117,22 @@ class BulletManipulatorEnv(AbstractControlledEnv):
             pybullet.VELOCITY_CONTROL,
             forces=np.zeros(self.n_dofs),
         )
+
+        # Get total number of joints in the robot (may include gripper/finger joints)
+        self.num_all_joints = self.sim.getNumJoints(self.robot_id)
+        
+        # Get list of movable (non-fixed) joint indices for inverse dynamics
+        # calculateInverseDynamics requires values only for movable joints
+        self.movable_joint_indices = []
+        for i in range(self.num_all_joints):
+            joint_info = self.sim.getJointInfo(self.robot_id, i)
+            joint_type = joint_info[2]
+            if joint_type != pybullet.JOINT_FIXED:
+                self.movable_joint_indices.append(i)
+        self.num_movable_joints = len(self.movable_joint_indices)
+        
+        # Create mapping from movable joint index to position in the movable joints list
+        self.movable_joint_to_idx = {j: i for i, j in enumerate(self.movable_joint_indices)}
 
         # Initialize variables
         self.prev_torques_commanded = np.zeros(self.n_dofs)
@@ -278,15 +306,51 @@ class BulletManipulatorEnv(AbstractControlledEnv):
         joint_des_pos = self.sim.calculateInverseKinematics(**ik_kwargs)
         return np.array(joint_des_pos)
 
+    def _get_movable_joint_states(self):
+        """Get positions and velocities for movable (non-fixed) joints only."""
+        joint_states = self.sim.getJointStates(
+            self.robot_id, self.movable_joint_indices
+        )
+        pos = [state[0] for state in joint_states]
+        vel = [state[1] for state in joint_states]
+        return pos, vel
+
     def compute_inverse_dynamics(
         self, joint_pos: np.ndarray, joint_vel: np.ndarray, joint_acc: np.ndarray
     ):
         """Computes inverse dynamics by returning the torques necessary to get the desired accelerations
-        at the given joint position and velocity."""
-        torques = self.sim.calculateInverseDynamics(
-            self.robot_id, list(joint_pos), list(joint_vel), list(joint_acc)
+        at the given joint position and velocity.
+        
+        Note: PyBullet's calculateInverseDynamics requires values for all MOVABLE (non-fixed) joints.
+        This method handles that by getting the current state of movable joints and overriding
+        only the controlled joint values.
+        """
+        # Get current state of all movable joints
+        movable_pos, movable_vel = self._get_movable_joint_states()
+        movable_acc = [0.0] * self.num_movable_joints
+        
+        # Override controlled joints with the provided values
+        for i, joint_idx in enumerate(self.controlled_joints):
+            if joint_idx in self.movable_joint_to_idx:
+                idx = self.movable_joint_to_idx[joint_idx]
+                movable_pos[idx] = joint_pos[i]
+                movable_vel[idx] = joint_vel[i]
+                movable_acc[idx] = joint_acc[i]
+        
+        # Calculate inverse dynamics for movable joints
+        all_torques = self.sim.calculateInverseDynamics(
+            self.robot_id, movable_pos, movable_vel, movable_acc
         )
-        return np.asarray(torques)
+        
+        # Return only torques for controlled joints
+        controlled_torques = []
+        for joint_idx in self.controlled_joints:
+            if joint_idx in self.movable_joint_to_idx:
+                idx = self.movable_joint_to_idx[joint_idx]
+                controlled_torques.append(all_torques[idx])
+            else:
+                controlled_torques.append(0.0)
+        return np.asarray(controlled_torques)
 
     def set_robot_state(self, robot_state):
         req_joint_pos = robot_state.joint_positions
@@ -320,3 +384,24 @@ class BulletManipulatorEnv(AbstractControlledEnv):
             bodyUniqueId=self.robot_id,
             jointIndices=self.controlled_joints,
         )
+
+    def close(self):
+        """Cleanly disconnect the PyBullet simulation to avoid leaving GL/X contexts open."""
+        try:
+            # step a few times to let any pending operations finish
+            for _ in range(5):
+                try:
+                    self.sim.stepSimulation()
+                except Exception:
+                    break
+            # disconnect the BulletClient which also closes any GUI windows
+            try:
+                self.sim.disconnect()
+            except Exception:
+                # fallback to pybullet.disconnect if needed
+                try:
+                    pybullet.disconnect()
+                except Exception:
+                    pass
+        except Exception:
+            log.exception("Exception during BulletManipulatorEnv.close()")

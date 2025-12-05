@@ -2,7 +2,7 @@
 
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
-from typing import Dict
+from typing import Dict, Tuple
 
 import torch
 
@@ -311,10 +311,12 @@ class CartesianImpedanceControlWithFF(CartesianImpedanceControl):
         # Allow updating feedforward wrench through controller updates
         if "ee_wrench_ff" in update_dict:
             self.ee_wrench_ff.copy_(update_dict["ee_wrench_ff"])
-        # Update remaining parameters using base implementation
-        remaining = {k: v for k, v in update_dict.items() if k != "ee_wrench_ff"}
-        if len(remaining) > 0:
-            super().update(remaining)
+        # Update remaining parameters using base implementation logic
+        # Note: We inline the base class logic here because TorchScript doesn't support super().update()
+        # and doesn't support dict comprehensions with 'if'
+        for name in update_dict.keys():
+            if name != "ee_wrench_ff":
+                self._param_dict[name].data.copy_(update_dict[name])
 
     def forward(self, state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         # Same as base class but adds wrench feedforward
@@ -355,6 +357,11 @@ class CartesianAdmittanceControl(toco.PolicyModule):
 
     An admittance filter integrates external wrench into an inner desired
     pose/velocity, which is then tracked by a Cartesian impedance outer loop.
+    
+    Based on the C++ reference implementation (admittance.hpp):
+    - Error is computed between inner_SE3 and desired SE3 (not current and inner)
+    - Integration uses proper SE3 manifold integration via exp map
+    - Wrench is transformed to world-aligned frame before use
     """
 
     def __init__(
@@ -382,25 +389,93 @@ class CartesianAdmittanceControl(toco.PolicyModule):
             joint_pos_current
         )
 
-        # Inner (integrated) state
+        # Inner (integrated) state - corresponds to inner_SE3_ and inner_motion_ in C++
         self.register_buffer("inner_pos", ee_pos_current)
         self.register_buffer("inner_quat", ee_quat_current)
         self.register_buffer("inner_twist", torch.zeros(6))
         self._initialized: bool = False
 
-        # Desired admittance set-points
+        # Desired admittance set-points - corresponds to adm_ee_des_, adm_vee_des_, adm_aee_des_ in C++
         self.adm_pos_desired = torch.nn.Parameter(ee_pos_current.clone())
         self.adm_quat_desired = torch.nn.Parameter(ee_quat_current.clone())
         self.adm_twist_desired = torch.nn.Parameter(torch.zeros(6))
         self.adm_acc_desired = torch.nn.Parameter(torch.zeros(6))
 
-        # Admittance gains
+        # Admittance gains - corresponds to aMd_, aKd_, aDd_ in C++
         self.register_buffer("adm_mass", adm_mass)
         self.register_buffer("adm_mass_inv", torch.inverse(adm_mass))
         self.register_buffer("adm_damping", adm_damping)
         self.register_buffer("adm_stiffness", adm_stiffness)
 
         self.dt = dt
+
+    def _se3_error(
+        self, pos_current: torch.Tensor, quat_current: torch.Tensor,
+        pos_desired: torch.Tensor, quat_desired: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Compute SE3 error from current to desired pose.
+        Equivalent to adaptive::utils::SE3Error(current, desired) in C++.
+        Returns 6D error vector [linear_error, angular_error] in world-aligned frame.
+        """
+        # Position error: desired - current
+        pos_error = pos_desired - pos_current
+        
+        # Orientation error: log(quat_desired * quat_current^{-1})
+        # This gives error in world-aligned frame (LOCAL_WORLD_ALIGNED in pinocchio)
+        quat_current_inv = torch.ops.torchrot.invert_quaternion(quat_current)
+        quat_error = torch.ops.torchrot.quaternion_multiply(quat_desired, quat_current_inv)
+        rot_error = torch.ops.torchrot.quat2rotvec(quat_error)
+        
+        return torch.cat([pos_error, rot_error])
+
+    def _motion_error(
+        self, twist_current: torch.Tensor, twist_desired: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Compute motion (twist) error.
+        Equivalent to adaptive::utils::motionError(current, desired) in C++.
+        """
+        return twist_desired - twist_current
+
+    def _transform_wrench_to_world_aligned(
+        self, wrench_local: torch.Tensor, quat_ee: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Transform wrench from LOCAL (end-effector) frame to LOCAL_WORLD_ALIGNED frame.
+        Equivalent to pinocchio::changeReferenceFrame in C++.
+        
+        In LOCAL_WORLD_ALIGNED frame, the force/torque vectors are expressed in
+        world-aligned coordinates but at the end-effector origin.
+        """
+        # Convert quaternion to rotation matrix
+        rot_matrix = torch.ops.torchrot.quat2matrix(quat_ee)
+        
+        # Transform linear force and angular torque
+        force_world = rot_matrix @ wrench_local[:3]
+        torque_world = rot_matrix @ wrench_local[3:]
+        
+        return torch.cat([force_world, torque_world])
+
+    def _se3_exp(self, twist: torch.Tensor, dt: float) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute SE3 exponential map: exp(twist * dt).
+        Returns (translation_delta, quat_delta) representing the SE3 displacement.
+        
+        This is equivalent to pinocchio::exp6(motion * dt) in C++.
+        """
+        linear_vel = twist[:3]
+        angular_vel = twist[3:]
+        
+        # Angular displacement
+        rotvec = angular_vel * dt
+        quat_delta = torch.ops.torchrot.rotvec2quat(rotvec)
+        
+        # Linear displacement
+        # For small timesteps, use semi-implicit Euler: pos_delta = v * dt
+        pos_delta = linear_vel * dt
+        
+        return pos_delta, quat_delta
 
     def forward(self, state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         q = state_dict["joint_positions"]
@@ -410,28 +485,31 @@ class CartesianAdmittanceControl(toco.PolicyModule):
         jacobian = self.robot_model.compute_jacobian(q)
         ee_twist_current = jacobian @ dq
 
-        # One-time initialization of inner state to avoid transient bump
+        # One-time initialization of inner state to current EE pose
         if not self._initialized:
-            self.inner_pos = ee_pos_current
-            self.inner_quat = ee_quat_current
-            self.inner_twist = ee_twist_current
+            self.inner_pos = ee_pos_current.clone()
+            self.inner_quat = ee_quat_current.clone()
+            self.inner_twist = ee_twist_current.clone()
             self._initialized = True
 
-        # Pose & velocity errors between inner state and admittance set-point
-        pos_error = self.adm_pos_desired - self.inner_pos
-        rel_quat = torch.ops.torchrot.quaternion_multiply(
-            self.adm_quat_desired, torch.ops.torchrot.invert_quaternion(self.inner_quat)
+        # NOTE: Error computed with inner state (not current)
+        se3_error = self._se3_error(
+            self.inner_pos, self.inner_quat,
+            self.adm_pos_desired, self.adm_quat_desired
         )
-        rot_error = torch.ops.torchrot.quat2rotvec(rel_quat)
-        se3_error = torch.cat([pos_error, rot_error])
-        vel_error = self.adm_twist_desired - self.inner_twist
+        
+        # Velocity error between inner state and desired
+        vel_error = self._motion_error(self.inner_twist, self.adm_twist_desired)
 
         # External wrench estimate from measured external torques
-        wrench_ext = torch.matmul(
+        wrench_ext_local = torch.matmul(
             torch.pinverse(jacobian.T), state_dict["motor_torques_external"]
         )
+        
+        # Transform wrench from LOCAL to LOCAL_WORLD_ALIGNED frame
+        wrench_ext = self._transform_wrench_to_world_aligned(wrench_ext_local, ee_quat_current)
 
-        # Admittance dynamics: M * a + D * (v - v_d) + K * (x - x_d) = F_ext + M * a_d
+        # Admittance dynamics: M * a = M * a_d + K * se3_error + D * vel_error + F_ext
         force_term = (
             self.adm_mass @ self.adm_acc_desired
             + self.adm_stiffness @ se3_error
@@ -440,18 +518,22 @@ class CartesianAdmittanceControl(toco.PolicyModule):
         )
         accel = self.adm_mass_inv @ force_term
 
-        # Integrate inner state (semi-implicit Euler)
+        # Semi-implicit Euler integration on SE3 manifold
         inner_twist_next = self.inner_twist + accel * self.dt
-        inner_pos_next = self.inner_pos + inner_twist_next[:3] * self.dt
-        inner_rotvec = torch.ops.torchrot.quat2rotvec(self.inner_quat)
-        inner_rotvec_next = inner_rotvec + inner_twist_next[3:] * self.dt
-        inner_quat_next = torch.ops.torchrot.rotvec2quat(inner_rotvec_next)
+        
+        # SE3 integration: inner_SE3 = exp(inner_motion * dt) * inner_SE3
+        pos_delta, quat_delta = self._se3_exp(inner_twist_next, self.dt)
+        
+        inner_pos_next = self.inner_pos + pos_delta
+        # Quaternion composition: q_new = q_delta * q_current (right multiplication)
+        inner_quat_next = torch.ops.torchrot.quaternion_multiply(quat_delta, self.inner_quat)
+        inner_quat_next = torch.ops.torchrot.normalize_quaternion(inner_quat_next)
 
         self.inner_twist = inner_twist_next
         self.inner_pos = inner_pos_next
         self.inner_quat = inner_quat_next
 
-        # Track inner state with outer Cartesian impedance
+        # Track inner state with outer Cartesian impedance (PD controller)
         wrench_feedback = self.pose_pd(
             ee_pos_current,
             ee_quat_current,

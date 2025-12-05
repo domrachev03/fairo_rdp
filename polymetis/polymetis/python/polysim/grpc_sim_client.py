@@ -106,9 +106,20 @@ class GrpcSimulationClient(AbstractRobotClient):
 
     def __del__(self):
         """Close connection in destructor"""
-        self.channel.close()
+        try:
+            self.channel.close()
+        except Exception:
+            pass
         if self._state_setter:
             self.unsync()
+        # attempt to close the simulation environment cleanly
+        try:
+            if hasattr(self, "env") and getattr(self, "env") is not None:
+                close_fn = getattr(self.env, "close", None)
+                if callable(close_fn):
+                    close_fn()
+        except Exception:
+            log.exception("Exception when attempting to close env in __del__")
 
     def run_no_wait(self, time_horizon=float("inf")):
         assert self._runner is None, "Simulator already running in background thread!"

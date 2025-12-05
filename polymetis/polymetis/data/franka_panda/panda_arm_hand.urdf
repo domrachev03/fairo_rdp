@@ -25,6 +25,11 @@
         <mesh filename="meshes/collision/link0.stl"/>
       </geometry>
     </collision>
+    <inertial>
+      <origin rpy="0 0 0" xyz="-0.041018 -0.00014 0.049974"/>
+      <mass value="0.629769"/>
+      <inertia ixx="0.00315" ixy="8.2904e-07" ixz="0.00015" iyy="0.00388" iyz="8.2299e-06" izz="0.004285"/>
+    </inertial>
   </link>
   <link name="panda_link1">
     <visual>
@@ -246,6 +251,11 @@
         <mesh filename="meshes/collision/hand.stl"/>
       </geometry>
     </collision>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0.04"/>
+      <mass value="0.73"/>
+      <inertia ixx="0.001" ixy="0" ixz="0" iyy="0.0025" iyz="0" izz="0.0017"/>
+    </inertial>
   </link>
   <link name="panda_leftfinger">
     <visual>
@@ -259,6 +269,11 @@
         <mesh filename="meshes/collision/finger.stl"/>
       </geometry>
     </collision>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0.015"/>
+      <mass value="0.015"/>
+      <inertia ixx="2.375e-06" ixy="0" ixz="0" iyy="2.375e-06" iyz="0" izz="7.5e-07"/>
+    </inertial>
   </link>
   <link name="panda_rightfinger">
     <visual>
@@ -272,6 +287,11 @@
         <mesh filename="meshes/collision/finger.stl"/>
       </geometry>
     </collision>
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0.015"/>
+      <mass value="0.015"/>
+      <inertia ixx="2.375e-06" ixy="0" ixz="0" iyy="2.375e-06" iyz="0" izz="7.5e-07"/>
+    </inertial>
   </link>
   <joint name="panda_finger_joint1" type="prismatic">
     <parent link="panda_hand"/>
