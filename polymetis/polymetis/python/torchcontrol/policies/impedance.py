@@ -282,73 +282,7 @@ class CartesianImpedanceControl(toco.PolicyModule):
         return {"joint_torques": torque_out}
 
 
-class CartesianImpedanceControlWithFF(CartesianImpedanceControl):
-    """
-    Cartesian impedance controller with an end-effector wrench feedforward term.
-    The feedforward wrench is treated as controller state (updated via `update`), not as a static parameter.
-    """
 
-    def __init__(
-        self,
-        joint_pos_current,
-        Kp,
-        Kd,
-        robot_model: torch.nn.Module,
-        ignore_gravity=True,
-    ):
-        super().__init__(
-            joint_pos_current=joint_pos_current,
-            Kp=Kp,
-            Kd=Kd,
-            robot_model=robot_model,
-            ignore_gravity=ignore_gravity,
-        )
-        # Feedforward wrench stored as buffer (controller state)
-        self.register_buffer("ee_wrench_ff", torch.zeros(6))
-
-    @torch.jit.export
-    def update(self, update_dict: Dict[str, torch.Tensor]) -> None:
-        # Allow updating feedforward wrench through controller updates
-        if "ee_wrench_ff" in update_dict:
-            self.ee_wrench_ff.copy_(update_dict["ee_wrench_ff"])
-        # Update remaining parameters using base implementation logic
-        # Note: We inline the base class logic here because TorchScript doesn't support super().update()
-        # and doesn't support dict comprehensions with 'if'
-        for name in update_dict.keys():
-            if name != "ee_wrench_ff":
-                self._param_dict[name].data.copy_(update_dict[name])
-
-    def forward(self, state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        # Same as base class but adds wrench feedforward
-        joint_pos_current = state_dict["joint_positions"]
-        joint_vel_current = state_dict["joint_velocities"]
-
-        ee_pos_current, ee_quat_current = self.robot_model.forward_kinematics(
-            joint_pos_current
-        )
-        jacobian = self.robot_model.compute_jacobian(joint_pos_current)
-        ee_twist_current = jacobian @ joint_vel_current
-
-        wrench_feedback = self.pose_pd(
-            ee_pos_current,
-            ee_quat_current,
-            ee_twist_current,
-            self.ee_pos_desired,
-            self.ee_quat_desired,
-            torch.cat([self.ee_vel_desired, self.ee_rvel_desired]),
-        )
-        torque_feedback = jacobian.T @ wrench_feedback
-
-        torque_feedforward = self.invdyn(
-            joint_pos_current, joint_vel_current, torch.zeros_like(joint_pos_current)
-        )  # coriolis
-
-        # TODO: do we need to include force from FT sensor here?
-        torque_ff_wrench = jacobian.T @ self.ee_wrench_ff
-
-        torque_out = torque_feedback + torque_feedforward + torque_ff_wrench
-
-        return {"joint_torques": torque_out}
 
 
 class CartesianAdmittanceControl(toco.PolicyModule):

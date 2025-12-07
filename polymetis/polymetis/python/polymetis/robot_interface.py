@@ -689,6 +689,23 @@ class RobotInterface(BaseRobotInterface):
 
         return self.send_torch_policy(torch_policy=torch_policy, blocking=False)
 
+    def start_hybrid_joint_impedance_with_ff(self, Kq=None, Kqd=None, Kx=None, Kxd=None, **kwargs):
+        """Starts hybrid joint impedance control with an end-effector wrench feedforward term.
+        The desired EE pose can be updated using `update_desired_ee_pose` (which does IK internally),
+        and the wrench feedforward can be updated with `update_desired_ee_wrench`.
+        """
+        torch_policy = toco.policies.HybridJointImpedanceControlWithFF(
+            joint_pos_current=self.get_joint_positions(),
+            Kq=self.Kq_default if Kq is None else Kq,
+            Kqd=self.Kqd_default if Kqd is None else Kqd,
+            Kx=self.Kx_default if Kx is None else Kx,
+            Kxd=self.Kxd_default if Kxd is None else Kxd,
+            robot_model=self.robot_model,
+            ignore_gravity=self.use_grav_comp,
+        )
+
+        return self.send_torch_policy(torch_policy=torch_policy, blocking=False)
+
     def start_cartesian_admittance(
         self,
         adm_mass: torch.Tensor = None,
