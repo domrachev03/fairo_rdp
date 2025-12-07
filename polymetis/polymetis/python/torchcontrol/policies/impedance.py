@@ -418,16 +418,16 @@ class CartesianAdmittanceControl(toco.PolicyModule):
         Equivalent to adaptive::utils::SE3Error(current, desired) in C++.
         Returns 6D error vector [linear_error, angular_error] in world-aligned frame.
         """
-        # Position error: desired - current
-        pos_error = pos_desired - pos_current
-        
         # Orientation error: log(quat_desired * quat_current^{-1})
         # This gives error in world-aligned frame (LOCAL_WORLD_ALIGNED in pinocchio)
         quat_current_inv = torch.ops.torchrot.invert_quaternion(quat_current)
         quat_error = torch.ops.torchrot.quaternion_multiply(quat_desired, quat_current_inv)
-        rot_error = torch.ops.torchrot.quat2rotvec(quat_error)
+        ori_err = torch.ops.torchrot.quat2rotvec(quat_error)
         
-        return torch.cat([pos_error, rot_error])
+        # Position error: desired - current
+        pos_err = pos_desired - pos_current
+
+        return torch.cat([pos_err, ori_err])
 
     def _motion_error(
         self, twist_current: torch.Tensor, twist_desired: torch.Tensor
@@ -502,12 +502,9 @@ class CartesianAdmittanceControl(toco.PolicyModule):
         vel_error = self._motion_error(self.inner_twist, self.adm_twist_desired)
 
         # External wrench estimate from measured external torques
-        wrench_ext_local = torch.matmul(
+        wrench_ext = torch.matmul(
             torch.pinverse(jacobian.T), state_dict["motor_torques_external"]
         )
-        
-        # Transform wrench from LOCAL to LOCAL_WORLD_ALIGNED frame
-        wrench_ext = self._transform_wrench_to_world_aligned(wrench_ext_local, ee_quat_current)
 
         # Admittance dynamics: M * a = M * a_d + K * se3_error + D * vel_error + F_ext
         force_term = (

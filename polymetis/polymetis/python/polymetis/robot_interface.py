@@ -707,11 +707,12 @@ class RobotInterface(BaseRobotInterface):
             Kx: Outer-loop Cartesian P gains
             Kxd: Outer-loop Cartesian D gains
         """
-        default_mass = torch.diag(torch.tensor([3.0, 3.0, 3.0, 1.0, 1.0, 1.0]))
-        default_damping = torch.diag(torch.tensor([80.0, 80.0, 80.0, 10.0, 10.0, 10.0]))
+        default_mass = torch.diag(torch.tensor([1.0, 1.0, 1.0, 0.1, 0.1, 0.1]))
+        default_damping = torch.diag(torch.tensor([10.0, 10.0, 10.0, 10.0, 10.0, 10.0]))
         default_stiffness = torch.diag(
-            torch.tensor([300.0, 300.0, 300.0, 30.0, 30.0, 30.0])
+            torch.tensor([100.0] * 6)
         )
+
 
         torch_policy = toco.policies.CartesianAdmittanceControl(
             joint_pos_current=self.get_joint_positions(),
