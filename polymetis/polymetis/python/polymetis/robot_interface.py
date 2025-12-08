@@ -713,22 +713,26 @@ class RobotInterface(BaseRobotInterface):
         adm_stiffness: torch.Tensor = None,
         Kx: torch.Tensor = None,
         Kxd: torch.Tensor = None,
+        nullspace_damping: torch.Tensor = None,
         **kwargs,
     ):
         """Starts a Cartesian admittance controller.
 
         Args:
-            adm_mass: 6x6 inertia shaping matrix (defaults to diag([3,3,3,1,1,1]))
-            adm_damping: 6x6 damping matrix for admittance filter (defaults to diag([80,80,80,10,10,10]))
-            adm_stiffness: 6x6 stiffness matrix for admittance filter (defaults to diag([300,300,300,30,30,30]))
+            adm_mass: 6x6 inertia shaping matrix (defaults to diag([1,1,1,0.1,0.1,0.1]))
+            adm_damping: 6x6 damping matrix for admittance filter (defaults to diag([10]*6))
+            adm_stiffness: 6x6 stiffness matrix for admittance filter (defaults to diag([100]*6))
             Kx: Outer-loop Cartesian P gains
             Kxd: Outer-loop Cartesian D gains
+            nullspace_damping: 7-element vector of joint velocity damping gains in nullspace
         """
         default_mass = torch.diag(torch.tensor([1.0, 1.0, 1.0, 0.1, 0.1, 0.1]))
-        default_damping = torch.diag(torch.tensor([10.0, 10.0, 10.0, 10.0, 10.0, 10.0]))
+        default_damping = torch.diag(torch.tensor([20.0, 20.0, 20.0, 20.0, 20.0, 20.0]))
         default_stiffness = torch.diag(
-            torch.tensor([100.0] * 6)
+            torch.tensor([400.0, 400.0, 400.0, 400.0, 400.0, 400.0])
         )
+        # Nullspace damping: moderate damping on all joints to prevent nullspace drift
+        default_nullspace_damping = torch.tensor([10.0, 5.0, 1.0, 1.0, 1.0, 1.0, 0.5])
 
 
         torch_policy = toco.policies.CartesianAdmittanceControl(
@@ -741,6 +745,7 @@ class RobotInterface(BaseRobotInterface):
             robot_model=self.robot_model,
             dt=1.0 / self.hz,
             ignore_gravity=self.use_grav_comp,
+            nullspace_damping=default_nullspace_damping if nullspace_damping is None else nullspace_damping,
         )
 
         return self.send_torch_policy(torch_policy=torch_policy, blocking=False)

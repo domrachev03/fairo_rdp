@@ -309,6 +309,7 @@ class CartesianAdmittanceControl(toco.PolicyModule):
         robot_model: torch.nn.Module,
         dt: float,
         ignore_gravity=True,
+        nullspace_damping: torch.Tensor = None,
     ):
         super().__init__()
 
@@ -340,6 +341,11 @@ class CartesianAdmittanceControl(toco.PolicyModule):
         self.register_buffer("adm_mass_inv", torch.inverse(adm_mass))
         self.register_buffer("adm_damping", adm_damping)
         self.register_buffer("adm_stiffness", adm_stiffness)
+
+        # Nullspace damping for joint velocity damping in the nullspace
+        if nullspace_damping is None:
+            nullspace_damping = torch.zeros(7)  # Default: no nullspace damping
+        self.register_buffer("nullspace_damping", nullspace_damping)
 
         self.dt = dt
 
@@ -436,9 +442,15 @@ class CartesianAdmittanceControl(toco.PolicyModule):
         vel_error = self._motion_error(self.inner_twist, self.adm_twist_desired)
 
         # External wrench estimate from measured external torques
-        wrench_ext = torch.matmul(
-            torch.pinverse(jacobian.T), state_dict["motor_torques_external"]
-        )
+        # Use fast pseudo-inverse: (J^T)^+ = J (J^T J)^{-1} for 7x6 matrix J^T
+        # This is faster than torch.pinverse() for real-time control (avoids SVD)
+        # For overdetermined J^T (7x6), the least-squares solution is:
+        # wrench = (J J^T)^{-1} J @ tau_ext
+        JT = jacobian.T  # 7x6
+        J = jacobian     # 6x7
+        JJT = J @ JT     # 6x6
+        JJT_inv = torch.linalg.solve(JJT, torch.eye(6, device=JJT.device, dtype=JJT.dtype))
+        wrench_ext = JJT_inv @ (J @ state_dict["motor_torques_external"])
 
         # Admittance dynamics: M * a = M * a_d + K * se3_error + D * vel_error + F_ext
         force_term = (
@@ -479,6 +491,14 @@ class CartesianAdmittanceControl(toco.PolicyModule):
             q, dq, torch.zeros_like(q)
         )  # coriolis compensation
 
-        torque_out = torque_feedback + torque_feedforward
+        # Nullspace damping: project joint velocity damping into nullspace of Jacobian
+        # tau_null = (I - J^+ J) * (-Kd_null * dq)
+        # Using dynamically consistent nullspace projector for better behavior
+        JJT_inv = torch.linalg.solve(JJT, torch.eye(6, device=JJT.device, dtype=JJT.dtype))
+        J_pinv = JT @ JJT_inv  # 7x6: right pseudo-inverse of J
+        nullspace_projector = torch.eye(7, device=q.device, dtype=q.dtype) - J_pinv @ J
+        torque_nullspace = nullspace_projector @ (-self.nullspace_damping * dq)
+
+        torque_out = torque_feedback + torque_feedforward + torque_nullspace
 
         return {"joint_torques": torque_out}
