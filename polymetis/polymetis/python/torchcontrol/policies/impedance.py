@@ -196,6 +196,7 @@ class HybridJointImpedanceControlWithFF(toco.PolicyModule):
         torque_feedforward = self.invdyn(
             joint_pos_current, joint_vel_current, torch.zeros_like(joint_pos_current)
         )
+        self.ee_wrench_ff[3:] = 0.0
         torque_ff_wrench = jacobian.T @ self.ee_wrench_ff
 
         torque_out = torque_feedback + torque_feedforward + torque_ff_wrench
@@ -451,6 +452,7 @@ class CartesianAdmittanceControl(toco.PolicyModule):
         JJT = J @ JT     # 6x6
         JJT_inv = torch.linalg.solve(JJT, torch.eye(6, device=JJT.device, dtype=JJT.dtype))
         wrench_ext = JJT_inv @ (J @ state_dict["motor_torques_external"])
+        wrench_ext[2] -= 0.3
 
         # Admittance dynamics: M * a = M * a_d + K * se3_error + D * vel_error + F_ext
         force_term = (
