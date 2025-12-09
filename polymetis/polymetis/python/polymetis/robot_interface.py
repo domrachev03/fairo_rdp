@@ -726,13 +726,15 @@ class RobotInterface(BaseRobotInterface):
             Kxd: Outer-loop Cartesian D gains
             nullspace_damping: 7-element vector of joint velocity damping gains in nullspace
         """
-        default_mass = torch.diag(torch.tensor([10.0, 10.0, 0.1, 1.0, 1.0, 1.0]))
-        default_damping = torch.diag(torch.tensor([20.0, 20.0, 20.0, 20.0, 20.0, 20.0]))
+        default_mass = torch.diag(torch.tensor([2.0, 2.0, 2.0, 0.1, 0.1, 0.1]))
+        default_damping = torch.diag(torch.tensor([20.0] * 6))
         default_stiffness = torch.diag(
-            torch.tensor([800.0, 400.0, 400.0, 400.0, 400.0, 400.0])
+            torch.tensor([400.0] * 6)
         )
+
         # Nullspace damping: moderate damping on all joints to prevent nullspace drift
         default_nullspace_damping = torch.tensor([10.0, 5.0, 1.0, 1.0, 1.0, 1.0, 0.5])
+        # default_nullspace_damping = torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
 
         torch_policy = toco.policies.CartesianAdmittanceControl(
